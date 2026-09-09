@@ -8114,51 +8114,206 @@ bool SM64AP_CanLedgeGrab() {
     return SM64AP_HaveAbilityForCurrentLevel(SM64AP_ID_LEDGEGRAB - SM64AP_ABILITY_OFFSET);
 }
 
-static std::vector<std::string> SM64AP_WrapItemMessage(const std::string &text) {
-    static constexpr size_t glyphWidth = 12;
-    static constexpr size_t horizontalMargin = 2;
-    const size_t maxLineLength = static_cast<size_t>(
-        (GFX_DIMENSIONS_FROM_RIGHT_EDGE(0) - GFX_DIMENSIONS_FROM_LEFT_EDGE(0)) / glyphWidth
-    ) - horizontalMargin;
-    std::vector<std::string> lines;
-    size_t position = 0;
+static std::vector<u8> SM64AP_EncodeHudText(const std::string &text) {
+    std::vector<u8> encoded;
+    encoded.reserve(text.size() + 1);
 
-    while (position < text.size()) {
-        size_t remaining = text.size() - position;
-        if (remaining <= maxLineLength) {
-            lines.push_back(text.substr(position));
+    for (unsigned char c : text) {
+        if (std::isspace(c)) {
+            encoded.push_back(DIALOG_CHAR_SPACE);
+            continue;
+        }
+
+        int ch = SM64AP_EncodeSignCharacter(static_cast<char>(c));
+
+        if (ch >= 0) {
+            encoded.push_back(static_cast<u8>(ch));
+        } else {
+            encoded.push_back(0xF4); // ?
+        }
+    }
+
+    encoded.push_back(DIALOG_CHAR_TERMINATOR);
+    return encoded;
+}
+
+static s16 SM64AP_GetHudTextWidth(const std::string &text) {
+    std::vector<u8> encoded = SM64AP_EncodeHudText(text);
+    return -2 * get_str_x_pos_from_center(0, encoded.data(), 1.0f);
+}
+
+static std::vector<std::string> SM64AP_WrapHudText(const std::string &text, s16 maxWidth) {
+    std::vector<std::string> lines;
+    size_t start = 0;
+
+    while (start < text.size()) {
+        size_t end = start;
+        size_t lastSpace = std::string::npos;
+
+        while (end < text.size()) {
+            if (text[end] == ' ') {
+                lastSpace = end;
+            }
+
+            if (SM64AP_GetHudTextWidth(text.substr(start, end - start + 1)) > maxWidth) {
+                break;
+            }
+
+            end++;
+        }
+
+        if (end == text.size()) {
+            lines.push_back(text.substr(start));
             break;
         }
 
-        size_t end = position + maxLineLength;
-        size_t split = text.rfind(' ', end);
-        if (split == std::string::npos || split < position) {
-            split = end;
+        if (lastSpace != std::string::npos && lastSpace >= start) {
+            lines.push_back(text.substr(start, lastSpace - start));
+            start = lastSpace + 1;
+        } else {
+            lines.push_back(text.substr(start, end - start));
+            start = end;
         }
-        lines.push_back(text.substr(position, split - position));
-        position = split;
-        while (position < text.size() && text[position] == ' ') {
-            position++;
+
+        while (start < text.size() && text[start] == ' ') {
+            start++;
         }
     }
 
-    if (lines.empty()) {
-        lines.emplace_back();
-    }
     return lines;
 }
 
-static void SM64AP_PrintWrappedItemMessage(
-    const std::string &itemLine, const std::string &playerLine
+static void SM64AP_RenderMessageLine(
+    const std::string &text,
+    const std::string &bluePrefix = ""
 ) {
-    std::vector<std::string> lines = SM64AP_WrapItemMessage(itemLine);
-    for (size_t i = 0; i < lines.size(); i++) {
-        print_text(
-            GFX_DIMENSIONS_FROM_LEFT_EDGE(0),
-            static_cast<s32>((lines.size() - i) * 20),
-            lines[i].c_str());
+    const s16 x = GFX_DIMENSIONS_FROM_LEFT_EDGE(3);
+    const s16 y = 3;
+    const s16 lineHeight = 16;
+    const s16 maxWidth = GFX_DIMENSIONS_FROM_RIGHT_EDGE(3) - x;
+
+    std::vector<std::string> lines = SM64AP_WrapHudText(text, maxWidth);
+    std::vector<std::vector<u8>> encodedLines;
+
+    s16 boxWidth = 0;
+
+    for (const std::string &line : lines) {
+        encodedLines.push_back(SM64AP_EncodeHudText(line));
+        boxWidth = std::max(boxWidth, SM64AP_GetHudTextWidth(line));
     }
-    print_text(GFX_DIMENSIONS_FROM_LEFT_EDGE(0), 0, playerLine.c_str());
+
+    s16 boxHeight = 7 + lineHeight * lines.size();
+
+    create_dl_ortho_matrix();
+
+    create_dl_translation_matrix(MENU_MTX_PUSH, x - 4, y + boxHeight - 4, 0);
+    create_dl_scale_matrix(MENU_MTX_NOPUSH, (boxWidth + 7) / 130.0f, boxHeight / 80.0f, 1.0f);
+    gDPSetEnvColor(gDisplayListHead++, 0, 0, 0, 150);
+    gSPDisplayList(gDisplayListHead++, dl_draw_text_bg_box);
+    gSPPopMatrix(gDisplayListHead++, G_MTX_MODELVIEW);
+
+    gSPDisplayList(gDisplayListHead++, dl_ia_text_begin);
+
+    for (size_t i = 0; i < lines.size(); i++) {
+        s16 lineY = y + (lines.size() - i - 1) * lineHeight;
+
+        gDPSetEnvColor(gDisplayListHead++, 255, 255, 255, 255);
+        print_generic_string(x, lineY, encodedLines[i].data());
+    }
+
+    if (!bluePrefix.empty()) {
+        size_t remaining = bluePrefix.size();
+
+        for (size_t i = 0; i < lines.size() && remaining > 0; i++) {
+            size_t blueLength = std::min(remaining, lines[i].size());
+
+            if (blueLength > 0) {
+                std::string blueText = lines[i].substr(0, blueLength);
+                std::vector<u8> prefix = SM64AP_EncodeHudText(blueText);
+                s16 lineY = y + (lines.size() - i - 1) * lineHeight;
+
+                gDPSetEnvColor(gDisplayListHead++, 80, 160, 255, 255);
+                print_generic_string(x, lineY, prefix.data());
+
+                remaining -= blueLength;
+            }
+
+            if (remaining > 0) {
+                remaining--;
+            }
+        }
+    }
+
+    gSPDisplayList(gDisplayListHead++, dl_ia_text_end);
+}
+
+void SM64AP_RenderMessage() {
+    if (get_dialog_id() != -1 || !AP_IsMessagePending()) {
+        return;
+    }
+
+    AP_Message *msg = AP_GetLatestMessage();
+
+    std::string text;
+    std::string bluePrefix;
+
+    switch (msg->type) {
+        case AP_MessageType::ItemSend: {
+            AP_ItemSendMessage *o_msg =
+                static_cast<AP_ItemSendMessage *>(msg);
+
+            bluePrefix = o_msg->item;
+            text = o_msg->item
+                + " - Sent to "
+                + o_msg->recvPlayer;
+            break;
+        }
+
+        case AP_MessageType::ItemRecv: {
+            AP_ItemRecvMessage *o_msg =
+                static_cast<AP_ItemRecvMessage *>(msg);
+
+            bluePrefix = o_msg->item;
+            text = o_msg->item
+                + " - Received from "
+                + o_msg->sendPlayer;
+            break;
+        }
+
+        case AP_MessageType::Hint: {
+            AP_HintMessage *o_msg =
+                static_cast<AP_HintMessage *>(msg);
+
+            bluePrefix = o_msg->item;
+
+            text = o_msg->item
+                + " - Hint from "
+                + o_msg->sendPlayer
+                + " to "
+                + o_msg->recvPlayer
+                + " at "
+                + o_msg->location
+                + (o_msg->checked ? " (Checked)" : " (Unchecked)");
+            break;
+        }
+
+        case AP_MessageType::Countdown: {
+            AP_CountdownMessage *o_msg =
+                static_cast<AP_CountdownMessage *>(msg);
+
+            text = std::to_string(o_msg->timer);
+            break;
+        }
+
+        case AP_MessageType::Plaintext:
+        default:
+            text = msg->text;
+            break;
+    }
+
+    if (!text.empty()) {
+        SM64AP_RenderMessageLine(text, bluePrefix);
+    }
 }
 
 void SM64AP_PrintNext() {
@@ -8177,23 +8332,11 @@ void SM64AP_PrintNext() {
     if (!AP_IsMessagePending()) return;
     AP_Message* msg = AP_GetLatestMessage();
     int display_duration = msg_frame_duration;
-    if (msg->type == AP_MessageType::ItemSend) {
-        AP_ItemSendMessage* o_msg = static_cast<AP_ItemSendMessage*>(msg);
-        SM64AP_PrintWrappedItemMessage(
-            o_msg->item, "Sent to " + o_msg->recvPlayer);
-    } else if (msg->type == AP_MessageType::ItemRecv) {
-        AP_ItemRecvMessage* o_msg = static_cast<AP_ItemRecvMessage*>(msg);
-        SM64AP_PrintWrappedItemMessage(
-            o_msg->item, "Received from " + o_msg->sendPlayer);
-    } else if (msg->type == AP_MessageType::Countdown) {
+    if (msg->type == AP_MessageType::Countdown) {
         display_duration = 30;
-        AP_CountdownMessage* o_msg = static_cast<AP_CountdownMessage*>(msg);
-        print_text(GFX_DIMENSIONS_FROM_LEFT_EDGE(0) + SCREEN_WIDTH / 2, SCREEN_HEIGHT / 2, std::to_string(o_msg->timer).c_str());
     } else if (msg->type == AP_MessageType::Hint) {
         AP_HintMessage* o_msg = static_cast<AP_HintMessage*>(msg);
         SM64AP_MarkSignsForHintLocation(o_msg->location);
-    } else {
-        //print_text(GFX_DIMENSIONS_FROM_LEFT_EDGE(0), (1-0)*20, msg->text.c_str());
     }
     int displayed_frames = msg_frame_duration - cur_msg_frame_duration;
     if (displayed_frames + 1 < display_duration) {

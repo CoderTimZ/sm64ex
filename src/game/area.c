@@ -22,6 +22,7 @@
 #include "engine/geo_layout.h"
 #include "save_file.h"
 #include "level_table.h"
+#include "sm64ap.h"
 
 #include "gfx_dimensions.h"
 
@@ -385,6 +386,7 @@ void render_game(void) {
 
         gDPSetScissor(gDisplayListHead++, G_SC_NON_INTERLACE, 0, 0, SCREEN_WIDTH, SCREEN_HEIGHT);
         render_text_labels();
+        SM64AP_RenderMessage();
         do_cutscene_handler();
         print_displaying_credits_entry();
         gDPSetScissor(gDisplayListHead++, G_SC_NON_INTERLACE, 0, BORDER_HEIGHT, SCREEN_WIDTH,
@@ -418,6 +420,7 @@ void render_game(void) {
         }
     } else {
         render_text_labels();
+        SM64AP_RenderMessage();
         if (D_8032CE78 != 0) {
             clear_viewport(D_8032CE78, gWarpTransFBSetColor);
         } else {

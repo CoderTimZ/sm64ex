@@ -659,6 +659,7 @@ AP_EXTERN_C struct DialogEntry *SM64AP_GetSignDialogEntry(s16, struct DialogEntr
 
 // Print Next Message to Screen
 AP_EXTERN_C void SM64AP_PrintNext();
+AP_EXTERN_C void SM64AP_RenderMessage();
 
 // If an item exists on the stack, return it, otherwise 0
 AP_EXTERN_C int64_t SM64AP_PopDelayedStack();
