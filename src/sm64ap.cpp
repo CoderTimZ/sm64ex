@@ -8137,51 +8137,101 @@ static std::vector<u8> SM64AP_EncodeHudText(const std::string &text) {
     return encoded;
 }
 
-static s16 SM64AP_GetHudTextWidth(const std::string &text) {
-    std::vector<u8> encoded = SM64AP_EncodeHudText(text);
-    return -2 * get_str_x_pos_from_center(0, encoded.data(), 1.0f);
+static s16 SM64AP_GetHudGlyphWidth(u8 ch) {
+#if defined(VERSION_JP) || defined(VERSION_SH)
+    // Match print_generic_string's fixed advances and non-advancing period.
+    if (ch == DIALOG_CHAR_PERIOD) return 0;
+    return ch == DIALOG_CHAR_SPACE ? 5 : 10;
+#else
+    // The dialog slash is a control code that advances by two spaces.
+    if (ch == DIALOG_CHAR_SLASH) return 2 * gDialogCharWidths[DIALOG_CHAR_SPACE];
+    return gDialogCharWidths[ch];
+#endif
 }
 
-static std::vector<std::string> SM64AP_WrapHudText(const std::string &text, s16 maxWidth) {
-    std::vector<std::string> lines;
+struct SM64AP_HudMessageLine {
+    size_t sourceStart;
+    std::vector<u8> text;
+    std::vector<u8> blueText;
+    s16 width;
+};
+
+static std::vector<SM64AP_HudMessageLine> SM64AP_WrapHudText(
+    const std::vector<u8> &text, size_t blueLength, s16 maxWidth
+) {
+    std::vector<SM64AP_HudMessageLine> lines;
+    const size_t length = text.size() - 1; // Exclude the terminator.
     size_t start = 0;
 
-    while (start < text.size()) {
+    while (start < length) {
         size_t end = start;
         size_t lastSpace = std::string::npos;
+        s32 width = 0;
+        s32 widthBeforeSpace = 0;
 
-        while (end < text.size()) {
-            if (text[end] == ' ') {
+        while (end < length) {
+            if (text[end] == DIALOG_CHAR_SPACE) {
                 lastSpace = end;
+                widthBeforeSpace = width;
             }
-
-            if (SM64AP_GetHudTextWidth(text.substr(start, end - start + 1)) > maxWidth) {
-                break;
-            }
-
+            s16 advance = SM64AP_GetHudGlyphWidth(text[end]);
+            if (width + advance > maxWidth) break;
+            width += advance;
             end++;
         }
 
-        if (end == text.size()) {
-            lines.push_back(text.substr(start));
-            break;
+        size_t next = end;
+        if (end < length && lastSpace != std::string::npos) {
+            end = lastSpace;
+            next = lastSpace + 1;
+            width = widthBeforeSpace;
+        } else if (end == start) {
+            // Even a viewport narrower than one glyph must make progress.
+            width = SM64AP_GetHudGlyphWidth(text[end]);
+            next = ++end;
         }
 
-        if (lastSpace != std::string::npos && lastSpace >= start) {
-            lines.push_back(text.substr(start, lastSpace - start));
-            start = lastSpace + 1;
-        } else {
-            lines.push_back(text.substr(start, end - start));
-            start = end;
+        if (end > start) {
+            SM64AP_HudMessageLine line;
+            line.sourceStart = start;
+            line.width = static_cast<s16>(width);
+            line.text.assign(text.begin() + start, text.begin() + end);
+            line.text.push_back(DIALOG_CHAR_TERMINATOR);
+            // Encoding preserves one entry per source byte. Retain offsets so
+            // hard wraps and any number of discarded spaces preserve color.
+            size_t blueEnd = std::min(end, blueLength);
+            if (blueEnd > start) {
+                line.blueText.assign(text.begin() + start, text.begin() + blueEnd);
+                line.blueText.push_back(DIALOG_CHAR_TERMINATOR);
+            }
+            lines.push_back(std::move(line));
         }
 
-        while (start < text.size() && text[start] == ' ') {
-            start++;
-        }
+        start = next;
+        while (start < length && text[start] == DIALOG_CHAR_SPACE) start++;
     }
 
     return lines;
 }
+
+struct SM64AP_HudMessageLayout {
+    std::string text;
+    size_t blueLength = 0;
+    s16 maxWidth = -1;
+    s16 boxWidth = 0;
+    std::vector<SM64AP_HudMessageLine> lines;
+
+    void update(const std::string &newText, size_t newBlueLength, s16 newMaxWidth) {
+        // Compare content, not queue pointers, which can be reused after deletion.
+        if (text == newText && blueLength == newBlueLength && maxWidth == newMaxWidth) return;
+        text = newText;
+        blueLength = newBlueLength;
+        maxWidth = newMaxWidth;
+        lines = SM64AP_WrapHudText(SM64AP_EncodeHudText(text), blueLength, maxWidth);
+        boxWidth = 0;
+        for (const auto &line : lines) boxWidth = std::max(boxWidth, line.width);
+    }
+};
 
 static void SM64AP_RenderMessageLine(
     const std::string &text,
@@ -8191,23 +8241,17 @@ static void SM64AP_RenderMessageLine(
     const s16 y = 3;
     const s16 lineHeight = 16;
     const s16 maxWidth = GFX_DIMENSIONS_FROM_RIGHT_EDGE(3) - x;
-
-    std::vector<std::string> lines = SM64AP_WrapHudText(text, maxWidth);
-    std::vector<std::vector<u8>> encodedLines;
-
-    s16 boxWidth = 0;
-
-    for (const std::string &line : lines) {
-        encodedLines.push_back(SM64AP_EncodeHudText(line));
-        boxWidth = std::max(boxWidth, SM64AP_GetHudTextWidth(line));
-    }
+    static SM64AP_HudMessageLayout layout;
+    layout.update(text, bluePrefix.size(), maxWidth);
+    const auto &lines = layout.lines;
+    if (lines.empty()) return;
 
     s16 boxHeight = 7 + lineHeight * lines.size();
 
     create_dl_ortho_matrix();
 
     create_dl_translation_matrix(MENU_MTX_PUSH, x - 4, y + boxHeight - 4, 0);
-    create_dl_scale_matrix(MENU_MTX_NOPUSH, (boxWidth + 7) / 130.0f, boxHeight / 80.0f, 1.0f);
+    create_dl_scale_matrix(MENU_MTX_NOPUSH, (layout.boxWidth + 7) / 130.0f, boxHeight / 80.0f, 1.0f);
     gDPSetEnvColor(gDisplayListHead++, 0, 0, 0, 150);
     gSPDisplayList(gDisplayListHead++, dl_draw_text_bg_box);
     gSPPopMatrix(gDisplayListHead++, G_MTX_MODELVIEW);
@@ -8216,31 +8260,11 @@ static void SM64AP_RenderMessageLine(
 
     for (size_t i = 0; i < lines.size(); i++) {
         s16 lineY = y + (lines.size() - i - 1) * lineHeight;
-
         gDPSetEnvColor(gDisplayListHead++, 255, 255, 255, 255);
-        print_generic_string(x, lineY, encodedLines[i].data());
-    }
-
-    if (!bluePrefix.empty()) {
-        size_t remaining = bluePrefix.size();
-
-        for (size_t i = 0; i < lines.size() && remaining > 0; i++) {
-            size_t blueLength = std::min(remaining, lines[i].size());
-
-            if (blueLength > 0) {
-                std::string blueText = lines[i].substr(0, blueLength);
-                std::vector<u8> prefix = SM64AP_EncodeHudText(blueText);
-                s16 lineY = y + (lines.size() - i - 1) * lineHeight;
-
-                gDPSetEnvColor(gDisplayListHead++, 80, 160, 255, 255);
-                print_generic_string(x, lineY, prefix.data());
-
-                remaining -= blueLength;
-            }
-
-            if (remaining > 0) {
-                remaining--;
-            }
+        print_generic_string(x, lineY, lines[i].text.data());
+        if (!lines[i].blueText.empty()) {
+            gDPSetEnvColor(gDisplayListHead++, 80, 160, 255, 255);
+            print_generic_string(x, lineY, lines[i].blueText.data());
         }
     }
 
@@ -8248,7 +8272,7 @@ static void SM64AP_RenderMessageLine(
 }
 
 void SM64AP_RenderMessage() {
-    if (get_dialog_id() != -1 || !AP_IsMessagePending()) {
+    if (!AP_IsMessagePending()) {
         return;
     }
 
