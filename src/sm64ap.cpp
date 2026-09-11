@@ -508,6 +508,7 @@ std::map<int,int> map_entrances;
 std::map<int,int> map_sub_area_entrances;
 static int sm64_castle_return_shuffle_mode = 0;
 static int sm64_sub_area_shuffle_mode = 0;
+static int sm64_secret_course_shuffle_mode = 0;
 static bool sm64_ccm_slide_exit_arrival_pending = false;
 static int sm64_exit_return_to = 0;
 static int sm64_exit_orig_entrance_level = 0;
@@ -534,7 +535,8 @@ struct SM64APPendingReturnSpawn {
 
 static std::vector<SM64APReturnPoint> sm64_return_stack;
 static SM64APPendingReturnSpawn sm64_pending_return_spawn = {};
-static bool sm64_track_sub_area_return_stack = false;
+static bool sm64_keep_ssl_pyramid_top_open = false;
+static bool sm64_keep_thi_wiggler_entrance_open = false;
 
 std::map<int,int> map_boxid_locid;
 
@@ -2948,6 +2950,13 @@ static bool SM64AP_SubAreaReturnsToAreaStart(int sourceId) {
         || (sourceId >= 31 && sourceId <= 36);
 }
 
+static bool SM64AP_ShouldTrackPhysicalReturn(int sourceId) {
+    if (sourceId >= 31 && sourceId <= 36) {
+        return sm64_castle_return_shuffle_mode == 1;
+    }
+    return sm64_sub_area_shuffle_mode >= 2;
+}
+
 static void SM64AP_PushSubAreaReturnPoint(
     int sourceId, s16 level, s8 area, s16 sourceWarpNode
 ) {
@@ -2967,7 +2976,8 @@ static void SM64AP_PushSubAreaReturnPoint(
             : returnToAreaStart || !hasSourceNode ? 0x0A : sourceWarpNode;
     }
     point.sourceId = sourceId;
-    point.overridePosition = sourceId == 1 || sourceId == 5 || sourceId == 23 || sourceId == 32
+    point.overridePosition = sourceId == 1 || sourceId == 5 || sourceId == 10
+        || sourceId == 23 || sourceId == 32
         || (!returnToAreaStart
             && (!hasSourceNode || sourceId == 4
                 || sourceId == 7 || sourceId == 8 || sourceId == 9));
@@ -2989,10 +2999,10 @@ static void SM64AP_PushSubAreaReturnPoint(
         // The COTMC floor painting is also its warp trigger. Return inside the
         // hallway so HMC loads the entrance room and its goop before Mario
         // approaches it, while keeping Mario clear of the warp trigger.
-        point.pos[0] = 3351;
-        point.pos[1] = -4179;
-        point.pos[2] = 3400;
-        point.yaw = 0;
+        point.pos[0] = 2222;
+        point.pos[1] = -4279;
+        point.pos[2] = 5887;
+        point.yaw = 0x6000;
     } else if (sourceId == 7) {
         // The volcano warp covers the crater. Return beyond its trigger on the
         // outer platform instead of dropping Mario back into the volcano.
@@ -3000,13 +3010,27 @@ static void SM64AP_PushSubAreaReturnPoint(
         point.pos[1] = 300;
         point.pos[2] = 1400;
         point.yaw = 0;
-    } else if (sourceId == 8 || sourceId == 9) {
-        // Both pyramid openings can immediately catch an arrival. Return both
-        // entrances to the same flat ground above the side entrance.
+    } else if (sourceId == 8) {
+        // The side opening can immediately catch an arrival. Return on the
+        // flat ground above it instead.
         point.pos[0] = -2048;
         point.pos[1] = 300;
         point.pos[2] = 768;
         point.yaw = 0;
+    } else if (sourceId == 9) {
+        // Return beside the open summit instead of making Mario climb the
+        // pyramid and remove its top again.
+        point.pos[0] = -2048;
+        point.pos[1] = 1380;
+        point.pos[2] = -700;
+        point.yaw = 0;
+    } else if (sourceId == 10) {
+        // The Wiggler entrance covers the opening in Huge Island's summit.
+        // Return on the solid rim so Mario cannot immediately fall back in.
+        point.pos[0] = 870;
+        point.pos[1] = 4196;
+        point.pos[2] = -1570;
+        point.yaw = 0x4000;
     } else if (sourceId == 23) {
         // The TTM slide-exit podium is the warp itself. Return to the flat
         // platform beside it so Exit Course cannot immediately re-enter.
@@ -3080,6 +3104,11 @@ static bool SM64AP_TryReturnToPreviousEntrance(
     int returnStyle = SM64AP_ResolveReturnStyle(isDeathWarp, warpOp, returnStyleOverride);
     SM64APReturnPoint point = sm64_return_stack.back();
     sm64_return_stack.pop_back();
+    if (point.sourceId == 9) {
+        sm64_keep_ssl_pyramid_top_open = true;
+    } else if (point.sourceId == 10) {
+        sm64_keep_thi_wiggler_entrance_open = true;
+    }
     *destLevel = point.level;
     *destArea = point.area;
     *warpArg = 0;
@@ -3091,6 +3120,18 @@ static bool SM64AP_TryReturnToPreviousEntrance(
     }
     SM64AP_SetPendingReturnSpawn(point, spawnType, point.overridePosition);
     return true;
+}
+
+bool SM64AP_ConsumeOpenSSLPyramidTopReturn() {
+    bool keepOpen = sm64_keep_ssl_pyramid_top_open;
+    sm64_keep_ssl_pyramid_top_open = false;
+    return keepOpen;
+}
+
+bool SM64AP_ConsumeOpenTHIWigglerEntranceReturn() {
+    bool keepOpen = sm64_keep_thi_wiggler_entrance_open;
+    sm64_keep_thi_wiggler_entrance_open = false;
+    return keepOpen;
 }
 
 bool SM64AP_ApplyPendingReturnSpawn(s16* pos, s16* angle, u32* spawnType, s32* actionArg) {
@@ -3198,7 +3239,7 @@ void SM64AP_RedirectWarp(s16* curLevel, s16* destLevel, s8* curArea, s16* destAr
 
     auto subArea = map_sub_area_entrances.find(subAreaSource);
     if (subAreaSource != 0 && subArea != map_sub_area_entrances.end()) {
-        if (sm64_track_sub_area_return_stack) {
+        if (SM64AP_ShouldTrackPhysicalReturn(subAreaSource)) {
             s16 destinationLevel = (subArea->second >> 16) & 0xFF;
             s8 destinationArea = (subArea->second >> 8) & 0xFF;
             if (!SM64AP_CollapseReturnStackToZone(destinationLevel, destinationArea)) {
@@ -3247,11 +3288,18 @@ void SM64AP_RedirectWarp(s16* curLevel, s16* destLevel, s8* curArea, s16* destAr
         *destLevel == LEVEL_BITS || *curLevel == LEVEL_BITS) return; // Dont play around with this one
     if (*curLevel == LEVEL_HMC && *destLevel == LEVEL_COTMC) {
         int sourceKey = SM64AP_SourceEntranceKey(*destLevel, *destArea, sourceEntrance);
+        auto mixedDestination = map_sub_area_entrances.find(1000 + sourceKey);
+        if (mixedDestination != map_sub_area_entrances.end()) {
+            if (sm64_secret_course_shuffle_mode != 0) {
+                SM64AP_PushSubAreaReturnPoint(5, *curLevel, *curArea, sourceWarpNode);
+            }
+            SM64AP_DiscoverEntrance(sourceKey);
+            SM64AP_ApplySubAreaDestination(
+                mixedDestination->second, destLevel, destArea, destWarpNode, warpArg);
+            return;
+        }
         int destination = SM64AP_GetMappedEntrance(sourceKey);
-        if (destination != sourceKey) {
-            // COTMC is a normal secret-course entrance, not a shuffled
-            // sub-area. A redirected destination still needs to return to the
-            // physical entrance in HMC when Mario exits or dies, though.
+        if (sm64_secret_course_shuffle_mode != 0) {
             SM64AP_PushSubAreaReturnPoint(5, *curLevel, *curArea, sourceWarpNode);
         }
         SM64AP_DiscoverEntrance(sourceKey);
@@ -3367,13 +3415,10 @@ void SM64AP_SetCourseMap(std::map<int,int> map) {
 
 void SM64AP_SetSubAreaMap(std::map<int,int> map) {
     map_sub_area_entrances = map;
-    sm64_track_sub_area_return_stack = sm64_sub_area_shuffle_mode >= 2;
-    SM64AP_ClearReturnStack();
 }
 
 void SM64AP_SetSubAreaShuffleMode(int mode) {
     sm64_sub_area_shuffle_mode = mode;
-    sm64_track_sub_area_return_stack = mode >= 2;
 }
 
 void SM64AP_SetCastleReturnShuffleMode(int mode) {
@@ -4244,6 +4289,38 @@ static bool SM64AP_ParseJsonIntMap(const std::string &rawMap, std::map<int,int> 
     return pos == rawMap.size();
 }
 
+static void SM64AP_SetShuffleOptions(std::string rawOptions) {
+    std::string::size_type pos = 0;
+    if (!SM64AP_ConsumeJsonChar(rawOptions, pos, '{')) return;
+
+    while (true) {
+        SM64AP_SkipJsonWhitespace(rawOptions, pos);
+        if (pos < rawOptions.size() && rawOptions[pos] == '}') return;
+
+        std::string key;
+        if (!SM64AP_ParseJsonString(rawOptions, pos, key)
+            || !SM64AP_ConsumeJsonChar(rawOptions, pos, ':')) {
+            return;
+        }
+
+        if (key == "secret_course_shuffle") {
+            int mode = 0;
+            if (!SM64AP_ParseJsonInt(rawOptions, pos, mode)) return;
+            sm64_secret_course_shuffle_mode = mode;
+        } else if (!SM64AP_SkipJsonValue(rawOptions, pos)) {
+            return;
+        }
+
+        SM64AP_SkipJsonWhitespace(rawOptions, pos);
+        if (pos < rawOptions.size() && rawOptions[pos] == ',') {
+            pos++;
+            continue;
+        }
+        if (pos < rawOptions.size() && rawOptions[pos] == '}') return;
+        return;
+    }
+}
+
 static void SM64AP_SetStartInventory(std::string rawMap) {
     std::map<int,int> parsedMap;
     if (!SM64AP_ParseJsonIntMap(rawMap, parsedMap)) {
@@ -4699,6 +4776,7 @@ void SM64AP_GenericInit() {
     AP_RegisterSlotDataIntCallback("StarsToFinish", &SM64AP_SetStarsToFinish);
     AP_RegisterSlotDataIntCallback("CompletionType", &SM64AP_SetCompletionType);
     AP_RegisterSlotDataRawCallback("SpicyMycenaVersion", &SM64AP_SetWorldVersion);
+    AP_RegisterSlotDataRawCallback("Options", &SM64AP_SetShuffleOptions);
     AP_RegisterSlotDataIntCallback("MoveRandoVec", &SM64AP_SetMoveRandoVec);
     AP_RegisterSlotDataIntCallback("GlobalCapItems", &SM64AP_SetGlobalCapDisplay);
     AP_RegisterSlotDataIntCallback("ShowGlobalCapDisplay", &SM64AP_SetGlobalCapDisplay);
