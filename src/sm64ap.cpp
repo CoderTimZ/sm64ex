@@ -8227,15 +8227,40 @@ static s16 SM64AP_GetHudGlyphWidth(u8 ch) {
 #endif
 }
 
+// Archipelago NetUtils.JSONtoTextParser palette and flag precedence.
+static u32 SM64AP_GetItemTextColor(int flags) {
+    if (flags & 1) return 0xAF99EF; // Progression
+    if (flags & 2) return 0x6D8BE8; // Useful
+    if (flags & 4) return 0xFA8072; // Trap
+    return 0x00EEEE; // Filler
+}
+static constexpr u32 SM64AP_PLAYER_TEXT_COLOR = 0xFFFF00;
+
+struct SM64AP_HudTextSpan {
+    size_t start;
+    size_t length;
+    u32 color;
+
+    bool operator==(const SM64AP_HudTextSpan &other) const {
+        return start == other.start && length == other.length && color == other.color;
+    }
+};
+
+struct SM64AP_HudTextRun {
+    s16 x;
+    u32 color;
+    std::vector<u8> text;
+};
+
 struct SM64AP_HudMessageLine {
     size_t sourceStart;
     std::vector<u8> text;
-    std::vector<u8> blueText;
+    std::vector<SM64AP_HudTextRun> runs;
     s16 width;
 };
 
 static std::vector<SM64AP_HudMessageLine> SM64AP_WrapHudText(
-    const std::vector<u8> &text, size_t blueLength, s16 maxWidth
+    const std::vector<u8> &text, s16 maxWidth
 ) {
     std::vector<SM64AP_HudMessageLine> lines;
     const size_t length = text.size() - 1; // Exclude the terminator.
@@ -8275,13 +8300,6 @@ static std::vector<SM64AP_HudMessageLine> SM64AP_WrapHudText(
             line.width = static_cast<s16>(width);
             line.text.assign(text.begin() + start, text.begin() + end);
             line.text.push_back(DIALOG_CHAR_TERMINATOR);
-            // Encoding preserves one entry per source byte. Retain offsets so
-            // hard wraps and any number of discarded spaces preserve color.
-            size_t blueEnd = std::min(end, blueLength);
-            if (blueEnd > start) {
-                line.blueText.assign(text.begin() + start, text.begin() + blueEnd);
-                line.blueText.push_back(DIALOG_CHAR_TERMINATOR);
-            }
             lines.push_back(std::move(line));
         }
 
@@ -8294,33 +8312,54 @@ static std::vector<SM64AP_HudMessageLine> SM64AP_WrapHudText(
 
 struct SM64AP_HudMessageLayout {
     std::string text;
-    size_t blueLength = 0;
+    std::vector<SM64AP_HudTextSpan> spans;
     s16 maxWidth = -1;
     s16 boxWidth = 0;
     std::vector<SM64AP_HudMessageLine> lines;
 
-    void update(const std::string &newText, size_t newBlueLength, s16 newMaxWidth) {
+    void update(const std::string &newText, const std::vector<SM64AP_HudTextSpan> &newSpans, s16 newMaxWidth) {
         // Compare content, not queue pointers, which can be reused after deletion.
-        if (text == newText && blueLength == newBlueLength && maxWidth == newMaxWidth) return;
+        if (text == newText && spans == newSpans && maxWidth == newMaxWidth) return;
         text = newText;
-        blueLength = newBlueLength;
+        spans = newSpans;
         maxWidth = newMaxWidth;
-        lines = SM64AP_WrapHudText(SM64AP_EncodeHudText(text), blueLength, maxWidth);
+        lines = SM64AP_WrapHudText(SM64AP_EncodeHudText(text), maxWidth);
         boxWidth = 0;
-        for (const auto &line : lines) boxWidth = std::max(boxWidth, line.width);
+        for (auto &line : lines) {
+            boxWidth = std::max(boxWidth, line.width);
+            s16 x = 0;
+            for (size_t i = 0; i + 1 < line.text.size(); i++) {
+                // Encoding retains source-byte offsets, even across hard wraps.
+                const size_t source = line.sourceStart + i;
+                u32 color = 0xFFFFFF;
+                for (const auto &span : spans) {
+                    if (source >= span.start && source - span.start < span.length) {
+                        color = span.color;
+                        break;
+                    }
+                }
+                if (line.runs.empty() || line.runs.back().color != color) {
+                    if (!line.runs.empty()) line.runs.back().text.push_back(DIALOG_CHAR_TERMINATOR);
+                    line.runs.push_back({x, color, {}});
+                }
+                line.runs.back().text.push_back(line.text[i]);
+                x += SM64AP_GetHudGlyphWidth(line.text[i]);
+            }
+            if (!line.runs.empty()) line.runs.back().text.push_back(DIALOG_CHAR_TERMINATOR);
+        }
     }
 };
 
 static void SM64AP_RenderMessageLine(
     const std::string &text,
-    const std::string &bluePrefix = ""
+    const std::vector<SM64AP_HudTextSpan> &spans
 ) {
     const s16 x = GFX_DIMENSIONS_FROM_LEFT_EDGE(3);
     const s16 y = 3;
     const s16 lineHeight = 16;
     const s16 maxWidth = GFX_DIMENSIONS_FROM_RIGHT_EDGE(3) - x;
     static SM64AP_HudMessageLayout layout;
-    layout.update(text, bluePrefix.size(), maxWidth);
+    layout.update(text, spans, maxWidth);
     const auto &lines = layout.lines;
     if (lines.empty()) return;
 
@@ -8338,11 +8377,10 @@ static void SM64AP_RenderMessageLine(
 
     for (size_t i = 0; i < lines.size(); i++) {
         s16 lineY = y + (lines.size() - i - 1) * lineHeight;
-        gDPSetEnvColor(gDisplayListHead++, 255, 255, 255, 255);
-        print_generic_string(x, lineY, lines[i].text.data());
-        if (!lines[i].blueText.empty()) {
-            gDPSetEnvColor(gDisplayListHead++, 80, 160, 255, 255);
-            print_generic_string(x, lineY, lines[i].blueText.data());
+        for (const auto &run : lines[i].runs) {
+            gDPSetEnvColor(gDisplayListHead++, (run.color >> 16) & 0xFF,
+                          (run.color >> 8) & 0xFF, run.color & 0xFF, 255);
+            print_generic_string(x + run.x, lineY, run.text.data());
         }
     }
 
@@ -8357,17 +8395,20 @@ void SM64AP_RenderMessage() {
     AP_Message *msg = AP_GetLatestMessage();
 
     std::string text;
-    std::string bluePrefix;
+    std::vector<SM64AP_HudTextSpan> spans;
+    auto appendColored = [&](const std::string &part, u32 color) {
+        spans.push_back({text.size(), part.size(), color});
+        text += part;
+    };
 
     switch (msg->type) {
         case AP_MessageType::ItemSend: {
             AP_ItemSendMessage *o_msg =
                 static_cast<AP_ItemSendMessage *>(msg);
 
-            bluePrefix = o_msg->item;
-            text = o_msg->item
-                + " - Sent to "
-                + o_msg->recvPlayer;
+            appendColored(o_msg->item, SM64AP_GetItemTextColor(msg->itemFlags));
+            text += " - Sent to ";
+            appendColored(o_msg->recvPlayer, SM64AP_PLAYER_TEXT_COLOR);
             break;
         }
 
@@ -8375,10 +8416,9 @@ void SM64AP_RenderMessage() {
             AP_ItemRecvMessage *o_msg =
                 static_cast<AP_ItemRecvMessage *>(msg);
 
-            bluePrefix = o_msg->item;
-            text = o_msg->item
-                + " - Received from "
-                + o_msg->sendPlayer;
+            appendColored(o_msg->item, SM64AP_GetItemTextColor(msg->itemFlags));
+            text += " - Received from ";
+            appendColored(o_msg->sendPlayer, SM64AP_PLAYER_TEXT_COLOR);
             break;
         }
 
@@ -8386,15 +8426,12 @@ void SM64AP_RenderMessage() {
             AP_HintMessage *o_msg =
                 static_cast<AP_HintMessage *>(msg);
 
-            bluePrefix = o_msg->item;
-
-            text = o_msg->item
-                + " - Hint from "
-                + o_msg->sendPlayer
-                + " to "
-                + o_msg->recvPlayer
-                + " at "
-                + o_msg->location
+            appendColored(o_msg->item, SM64AP_GetItemTextColor(msg->itemFlags));
+            text += " - Hint from ";
+            appendColored(o_msg->sendPlayer, SM64AP_PLAYER_TEXT_COLOR);
+            text += " to ";
+            appendColored(o_msg->recvPlayer, SM64AP_PLAYER_TEXT_COLOR);
+            text += " at " + o_msg->location
                 + (o_msg->checked ? " (Checked)" : " (Unchecked)");
             break;
         }
@@ -8410,11 +8447,14 @@ void SM64AP_RenderMessage() {
         case AP_MessageType::Plaintext:
         default:
             text = msg->text;
+            for (const auto &name : msg->playerNameSpans) {
+                spans.push_back({name.first, name.second, SM64AP_PLAYER_TEXT_COLOR});
+            }
             break;
     }
 
     if (!text.empty()) {
-        SM64AP_RenderMessageLine(text, bluePrefix);
+        SM64AP_RenderMessageLine(text, spans);
     }
 }
 
