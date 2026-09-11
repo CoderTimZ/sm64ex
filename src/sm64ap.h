@@ -545,6 +545,7 @@ AP_EXTERN_C int SM64AP_LastLocationCheckId();
 
 // Print Next Message to Screen
 AP_EXTERN_C void SM64AP_PrintNext();
+AP_EXTERN_C void SM64AP_RenderMessage();
 
 // If an item exists on the stack, return it, otherwise 0
 AP_EXTERN_C int64_t SM64AP_PopDelayedStack();
